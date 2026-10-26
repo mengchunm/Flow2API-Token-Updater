@@ -273,7 +273,9 @@ test('all-account configuration supports no manually entered email and saves sch
   assert.equal(saved.refreshInterval, 15);
   assert.equal(bg.run('period'), 15);
   await bg.run(`saveConfiguration({apiUrl:'https://example.com', connectionToken:'test',
-    syncMode:'all', refreshInterval:30, autoSync:false}); period = null; restoreAlarm()`);
+    syncMode:'all', refreshInterval:30, autoSync:false})`);
+  bg.run('period = null');
+  await bg.run('restoreAlarm()');
   assert.equal(bg.run('period'), null);
   await assert.rejects(bg.run(`saveConfiguration({apiUrl:'https://example.com',connectionToken:'test',syncMode:'single'})`), /填写邮箱/);
 });
