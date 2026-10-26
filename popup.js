@@ -128,7 +128,6 @@ function getFormConfig() {
 }
 
 function setBusy(busy) {
-    document.getElementById('syncAllBtn').disabled = busy;
     document.getElementById('saveBtn').disabled = busy;
     document.getElementById('testBtn').disabled = busy;
     document.getElementById('discoverBtn').disabled = busy;
@@ -274,17 +273,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    document.getElementById('syncAllBtn').addEventListener('click', async () => {
-        setBusy(true);
-        showStatus('正在自动发现账号并逐个切换、提取和同步，关闭弹窗后任务仍会继续…', 'info', false);
-        try {
-            // 全部模式无需手动填写或选择邮箱。
-            await saveCurrentConfig();
-            const result = await sendMessage({ action: 'syncAll' });
-            showStatus(result?.message || '批量任务结束', result?.success ? 'success' : 'error', false);
-        } catch (error) { showStatus(error.message, 'error', false); }
-        finally { setBusy(false); }
-    });
     function renderBatch(batch) {
         const element = document.getElementById('batchState');
         if (!batch) return;
