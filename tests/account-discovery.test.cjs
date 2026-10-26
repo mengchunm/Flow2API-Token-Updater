@@ -262,3 +262,31 @@ test('chooser discovery waits for a second account rendered after the first', as
   assert.deepEqual(Array.from(result.emails), ['one@example.com','two@example.com']);
   assert.ok(bg.run('reads') >= 3);
 });
+
+test('all-account configuration supports no manually entered email and saves scheduling options', async () => {
+  const bg = background([], async () => {});
+  bg.run('globalThis.period = null; chrome.alarms.create = async (name, options) => { period = options.periodInMinutes; }');
+  const saved = await bg.run(`saveConfiguration({apiUrl:'https://example.com', connectionToken:'test',
+    loginAccount:'', syncMode:'all', refreshInterval:15, autoSync:true})`);
+  assert.equal(saved.loginAccount, '');
+  assert.equal(saved.syncMode, 'all');
+  assert.equal(saved.refreshInterval, 15);
+  assert.equal(bg.run('period'), 15);
+  await bg.run(`saveConfiguration({apiUrl:'https://example.com', connectionToken:'test',
+    syncMode:'all', refreshInterval:30, autoSync:false}); period = null; restoreAlarm()`);
+  assert.equal(bg.run('period'), null);
+  await assert.rejects(bg.run(`saveConfiguration({apiUrl:'https://example.com',connectionToken:'test',syncMode:'single'})`), /填写邮箱/);
+});
+
+test('scheduled sync follows saved scope and concurrent triggers share one task', async () => {
+  const bg = background([], async () => {}, {syncMode:'all'});
+  bg.run(`globalThis.batchCalls = 0; globalThis.singleCalls = 0;
+    executeBatchSync = async () => { batchCalls++; return {success:true,message:'batch'}; };
+    executeSync = async () => { singleCalls++; return {success:true,message:'single'}; };`);
+  await bg.run('Promise.all([syncNow(), syncNow()])');
+  assert.equal(bg.run('batchCalls'), 1);
+  assert.equal(bg.run('singleCalls'), 0);
+  bg.state.config.syncMode = 'single';
+  await bg.run('syncNow()');
+  assert.equal(bg.run('singleCalls'), 1);
+});

@@ -107,6 +107,8 @@ function getFormConfig() {
     const apiUrl = normalizeApiUrl(document.getElementById('apiUrl').value);
     const connectionToken = document.getElementById('connectionToken').value.trim();
     const loginAccount = document.getElementById('loginAccount').value.trim().toLowerCase();
+    const syncMode = document.getElementById('syncMode')?.value || 'all';
+    const autoSync = document.getElementById('autoSync')?.checked !== false;
     const refreshInterval = Number.parseInt(
         document.getElementById('refreshInterval').value,
         10
@@ -115,14 +117,14 @@ function getFormConfig() {
     if (!connectionToken) {
         throw new Error('请输入连接Token');
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginAccount)) {
+    if ((loginAccount || syncMode === 'single') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginAccount)) {
         throw new Error('请输入有效的Google账号邮箱');
     }
     if (!Number.isInteger(refreshInterval) || refreshInterval < 1 || refreshInterval > 1440) {
         throw new Error('刷新间隔必须在1-1440分钟之间');
     }
 
-    return { apiUrl, connectionToken, loginAccount, refreshInterval, sourceTabId: selectedAccountBinding?.sourceTabId ?? null, sourceWindowId: selectedAccountBinding?.sourceWindowId ?? null };
+    return { apiUrl, connectionToken, loginAccount, refreshInterval, syncMode, autoSync, sourceTabId: selectedAccountBinding?.sourceTabId ?? null, sourceWindowId: selectedAccountBinding?.sourceWindowId ?? null };
 }
 
 function setBusy(busy) {
@@ -189,6 +191,8 @@ async function loadConfig() {
     document.getElementById('loginAccount').value = config.loginAccount || '';
     selectedAccountBinding = Number.isInteger(config.sourceTabId) ? { sourceTabId: config.sourceTabId, sourceWindowId: config.sourceWindowId } : null;
     document.getElementById('refreshInterval').value = config.refreshInterval || 60;
+    document.getElementById('syncMode').value = config.syncMode || 'all';
+    document.getElementById('autoSync').checked = config.autoSync !== false;
     approvedInsecureOrigin = response.config.insecureHttpOrigin || '';
     renderLastSync(config.lastSync);
 }
@@ -251,7 +255,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!response || !response.success) {
                 throw new Error(response && response.error || '同步失败');
             }
-            const actionText = response.action === 'added' ? '已添加账号' : '已更新账号';
+            const actionText = response.results ? '轮流同步完成' : response.action === 'added' ? '已添加账号' : '已更新账号';
             showStatus(`同步成功：${actionText}\n${response.message || ''}`.trim(), 'success', false);
             renderLastSync({
                 timestamp: new Date().toISOString(),
@@ -274,8 +278,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         setBusy(true);
         showStatus('正在自动发现账号并逐个切换、提取和同步，关闭弹窗后任务仍会继续…', 'info', false);
         try {
-            // 未填写邮箱时先识别当前 Flow 身份，用户无需手动选择。
-            if (!document.getElementById('loginAccount').value.trim()) await discoverAccounts();
+            // 全部模式无需手动填写或选择邮箱。
             await saveCurrentConfig();
             const result = await sendMessage({ action: 'syncAll' });
             showStatus(result?.message || '批量任务结束', result?.success ? 'success' : 'error', false);
@@ -286,7 +289,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const element = document.getElementById('batchState');
         if (!batch) return;
         element.style.display = 'block';
-        element.textContent = `${batch.running ? '正在逐账号提取' : '批量提取完成'}：${batch.completed}/${batch.total}
+        element.textContent = `${batch.running ? '正在逐账号提取' : '批量提取完成'}：${batch.completed}/${batch.total}${batch.currentEmail ? ' · 当前：' + batch.currentEmail : ''}
 `
             + (batch.results || []).map(item => `${item.success ? '成功' : '失败'} · ${item.email} · ${item.message}`).join('\n');
     }

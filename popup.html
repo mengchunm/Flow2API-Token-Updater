@@ -175,14 +175,26 @@
     </div>
 
     <div class="form-group">
-        <label for="refreshInterval">刷新间隔（分钟）</label>
+        <label for="syncMode">同步范围</label>
+        <select id="syncMode" style="width:100%;padding:8px">
+            <option value="all">全部账号轮流同步</option>
+            <option value="single">仅同步填写的账号</option>
+        </select>
+        <div class="hint">全部模式每轮自动扫描账号，逐个切换、校验并同步；单个失败会继续处理其余账号。</div>
+    </div>
+    <div class="form-group">
+        <label><input type="checkbox" id="autoSync" checked> 启用定时同步</label>
+    </div>
+
+    <div class="form-group">
+        <label for="refreshInterval">每轮同步间隔（分钟）</label>
         <input type="number" id="refreshInterval" value="60" min="1" max="1440">
-        <div class="hint">建议设置为60分钟（1小时）</div>
+        <div class="hint">每轮依次处理全部发现账号，建议设置为60分钟。</div>
     </div>
 
     <div class="button-group">
         <button class="btn-primary" id="saveBtn">保存配置</button>
-        <button class="btn-secondary" id="testBtn">立即测试</button>
+        <button class="btn-secondary" id="testBtn">立即同步</button>
     </div>
 
     <div class="button-group"><button class="btn-primary" id="syncAllBtn">自动切换全部账号并提取同步</button></div>

@@ -99,6 +99,8 @@ async function publicState() {
     sourceWindowId: config.sourceWindowId ?? null,
     sourceUrl: config.sourceUrl || '',
     autoSync: config.autoSync !== false,
+    syncMode: config.syncMode || 'all',
+    refreshInterval: config.refreshInterval || 60,
     lastSync: state.lastSync || null
   };
 }
@@ -106,8 +108,8 @@ async function publicState() {
 async function restoreAlarm() {
   const { config } = await chrome.storage.local.get('config');
   await chrome.alarms.clear(ALARM);
-  if (config?.connectionToken && config.autoSync) {
-    await chrome.alarms.create(ALARM, { periodInMinutes: 60 });
+  if (config?.connectionToken && config.autoSync !== false) {
+    await chrome.alarms.create(ALARM, { periodInMinutes: config.refreshInterval || 60 });
   }
 }
 
@@ -115,10 +117,16 @@ async function saveConfiguration(input) {
   const state = await chrome.storage.local.get('config');
   const source = input.config || input;
   const connection = validateConnection({ apiUrl: source.apiUrl || state.config?.apiUrl, connectionToken: source.connectionToken || state.config?.connectionToken });
-  const config = { ...connection, loginAccount: validateEmail(source.loginAccount), autoSync: source.autoSync !== false,
+  const syncMode = source.syncMode || 'all';
+  if (!['all', 'single'].includes(syncMode)) throw new Error('同步模式无效');
+  const refreshInterval = Number(source.refreshInterval ?? 60);
+  if (!Number.isInteger(refreshInterval) || refreshInterval < 1 || refreshInterval > 1440) throw new Error('刷新间隔必须在1-1440分钟之间');
+  const loginAccount = source.loginAccount ? validateEmail(source.loginAccount) : '';
+  if (syncMode === 'single' && !loginAccount) throw new Error('单账号模式请先填写邮箱');
+  const config = { ...connection, loginAccount, syncMode, refreshInterval, autoSync: source.autoSync !== false,
     sourceTabId: Number.isInteger(source.sourceTabId) ? source.sourceTabId : null,
     sourceWindowId: Number.isInteger(source.sourceWindowId) ? source.sourceWindowId : null,
-    sourceUrl: flowAccountUrl(validateEmail(source.loginAccount)) };
+    sourceUrl: loginAccount ? flowAccountUrl(loginAccount) : '' };
   if (!await chrome.permissions.contains({ origins: [connectionPermission(config.apiUrl)] })) {
     throw new Error('请授权扩展连接本机 GFlow');
   }
@@ -384,8 +392,8 @@ async function readObservedFlowCookies(tabId, email) {
   }
 }
 
-async function executeSync(accountEmail = null) {
-  const { config } = await chrome.storage.local.get('config');
+async function executeSync(accountEmail = null, snapshot = null) {
+  const { config } = snapshot ? { config: snapshot } : await chrome.storage.local.get('config');
   if (!config) throw new Error('请先从 GFlow 复制配置并保存');
   const connection = validateConnection(config);
   const loginAccount = validateEmail(accountEmail || config.loginAccount);
@@ -533,29 +541,33 @@ async function executeBatchSync() {
   const discovery = await discoverAccounts();
   if (!discovery.accounts.length) throw new Error(discovery.message || '未发现可切换账号，请在 Flow 完成登录后重试');
   const results = [];
-  const batchState = { running: true, total: discovery.accounts.length, completed: 0, results };
+  const batchState = { running: true, total: discovery.accounts.length, completed: 0, currentEmail: '', startedAt: Date.now(), results };
   await chrome.storage.local.set({ batchSync: { ...batchState, startedAt: Date.now() } });
   for (const account of discovery.accounts) {
+    batchState.currentEmail = account.email;
+    await chrome.storage.local.set({ batchSync: { ...batchState, completed: results.length, results: [...results] } });
     let result;
     try {
       // executeSync 为每个邮箱创建独立临时页面，校验实际身份后才读取请求 Cookie。
-      result = await executeSync(account.email);
+      result = await executeSync(account.email, config);
     } catch (error) { result = { success: false, message: error.message }; }
     results.push({ email: account.email, success: result.success, message: result.message });
     await chrome.storage.local.set({ batchSync: { ...batchState, completed: results.length, results: [...results] } });
   }
   const succeeded = results.filter(item => item.success).length;
-  await chrome.storage.local.set({ batchSync: { ...batchState, running: false, completed: results.length, results, finishedAt: Date.now() } });
+  await chrome.storage.local.set({ batchSync: { ...batchState, running: false, currentEmail: '', completed: results.length, results, finishedAt: Date.now() } });
   return { success: succeeded === results.length, results,
     message: `共 ${results.length} 个账号，成功 ${succeeded} 个，失败 ${results.length - succeeded} 个` };
 }
 
-function syncNow(allAccounts = false) {
+function syncNow(allAccounts = null) {
   if (activeSync) return activeSync;
   activeSync = (async () => {
     let result;
     try {
-      result = await (allAccounts ? executeBatchSync() : executeSync());
+      const { config } = await chrome.storage.local.get('config');
+      const batch = allAccounts ?? (config?.syncMode !== 'single');
+      result = await (batch ? executeBatchSync() : executeSync());
     } catch (error) {
       result = { success: false, message: error.message };
     }
