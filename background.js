@@ -94,6 +94,8 @@ async function publicState() {
     connectionToken: config.connectionToken || '',
     loginAccount: config.loginAccount || '',
     apiUrl: config.apiUrl || '',
+    sourceTabId: config.sourceTabId ?? null,
+    sourceWindowId: config.sourceWindowId ?? null,
     autoSync: config.autoSync !== false,
     lastSync: state.lastSync || null
   };
@@ -111,7 +113,9 @@ async function saveConfiguration(input) {
   const state = await chrome.storage.local.get('config');
   const source = input.config || input;
   const connection = validateConnection({ apiUrl: source.apiUrl || state.config?.apiUrl, connectionToken: source.connectionToken || state.config?.connectionToken });
-  const config = { ...connection, loginAccount: validateEmail(source.loginAccount), autoSync: source.autoSync !== false, sourceTabId: Number.isInteger(source.sourceTabId) ? source.sourceTabId : (state.config?.sourceTabId || null), sourceWindowId: Number.isInteger(source.sourceWindowId) ? source.sourceWindowId : (state.config?.sourceWindowId || null) };
+  const config = { ...connection, loginAccount: validateEmail(source.loginAccount), autoSync: source.autoSync !== false,
+    sourceTabId: Number.isInteger(source.sourceTabId) ? source.sourceTabId : null,
+    sourceWindowId: Number.isInteger(source.sourceWindowId) ? source.sourceWindowId : null };
   if (!await chrome.permissions.contains({ origins: [connectionPermission(config.apiUrl)] })) {
     throw new Error('请授权扩展连接本机 GFlow');
   }
@@ -134,6 +138,41 @@ async function waitForTabReady(tabId, maxWaitMs = 15000) {
   }
 }
 
+// 扩展重载后，已打开的页面可能没有可用的 content script。
+// 仅向声明过权限的 Flow 页面注入固定脚本，不刷新用户页面。
+async function sendFlowMessage(tabId, message) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, message);
+    if ((response && typeof response.signed_in === 'boolean')
+        || (message.action === 'gflow-credit-check' && typeof response?.success === 'boolean')) return response;
+  } catch (_) {}
+  await chrome.scripting.executeScript({ target: { tabId }, files: ['flow-session.js'] });
+  const response = await chrome.tabs.sendMessage(tabId, message);
+  if (!response) throw new Error('无法读取 Flow 页面，请刷新页面后重新扫描');
+  return response;
+}
+
+async function discoverAccounts() {
+  const tabs = await chrome.tabs.query({ url: ['https://flow.google.com/*'] });
+  const results = await Promise.all(tabs.map(async tab => {
+    try {
+      if (tab.status === 'loading' && !await waitForTabReady(tab.id)) return { status: 'unreadable' };
+      const result = await sendFlowMessage(tab.id, { action: 'gflow-discover-account' });
+      if (!result.signed_in || !result.email) return { status: 'signedOut' };
+      return { status: 'found', account: {
+        email: validateEmail(result.email), tabId: tab.id, windowId: tab.windowId
+      } };
+    } catch (_) {
+      return { status: 'unreadable' };
+    }
+  }));
+  const accounts = Array.from(new Map(results.filter(item => item.account)
+    .map(item => [item.account.email, item.account])).values());
+  return { ok: true, success: true, accounts, scannedTabs: tabs.length,
+    unreadableTabs: results.filter(item => item.status === 'unreadable').length,
+    signedOutTabs: results.filter(item => item.status === 'signedOut').length };
+}
+
 async function closeTemporaryTab(tab) {
   if (tab && typeof tab.id === 'number') {
     try { await chrome.tabs.remove(tab.id); } catch (_) {}
@@ -153,7 +192,7 @@ async function readObservedFlowCookies(tabId, email) {
   chrome.webRequest.onBeforeSendHeaders.addListener(listener,
     {urls:['https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute*'],tabId}, ['requestHeaders','extraHeaders']);
   try {
-    const diagnostic = await chrome.tabs.sendMessage(tabId, {action:'gflow-credit-check',email});
+    const diagnostic = await sendFlowMessage(tabId, {action:'gflow-credit-check',email});
     // 保留浏览器的真实顺序和同名 Cookie；拒绝空值及报文控制字符。
     if (!cookieHeader || cookieHeader.length > 262144 || /[\x00-\x1f\x7f]/.test(cookieHeader)) {
       throw new Error('Chrome 未提供本次 Flow 请求的 Cookie，请确认扩展管理页已允许新权限后重试');
@@ -196,7 +235,7 @@ async function executeSync() {
   let pageUrl = FLOW_URL;
   try {
     const current = new URL(sourceTab?.url || '');
-    if (current.origin === 'https://flow.google.com' && /^\/project\/[a-f0-9-]{36}$/.test(current.pathname)) pageUrl = current.origin + current.pathname;
+    if (current.origin === 'https://flow.google.com') pageUrl = current.origin + current.pathname + current.search;
   } catch (_) {}
   try {
     if (chrome.tabs?.create && chrome.tabs?.get) {
@@ -211,7 +250,7 @@ async function executeSync() {
       await new Promise(resolve => setTimeout(resolve, 5000));
       if (chrome.tabs.sendMessage) {
         let session;
-        try { session = await chrome.tabs.sendMessage(tempTab.id, {action:'gflow-page-session',email:loginAccount}); }
+        try { session = await sendFlowMessage(tempTab.id, {action:'gflow-page-session',email:loginAccount}); }
         catch (_) { throw new Error('无法读取 Flow 页面登录态，请确认助手已重新加载后重试'); }
         if (!session?.signed_in) throw new Error('Flow 页面没有返回已登录账号，请在当前浏览器重新登录 Flow 后同步');
         if (session.account_matches !== true) throw new Error('Flow 当前账号与助手填写的邮箱不一致，请核对邮箱或使用独立浏览器配置');
@@ -329,15 +368,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
   const action = request.action;
   if (action === 'discoverAccounts') {
-    (async () => {
-      const tabs = await chrome.tabs.query({ url: ['https://flow.google.com/*'] });
-      const accounts = [];
-      for (const tab of tabs) {
-        try { const result = await chrome.tabs.sendMessage(tab.id, { action: 'gflow-discover-account' }); if (result?.email) accounts.push({ email: result.email, tabId: tab.id, windowId: tab.windowId }); } catch (_) {}
-      }
-      const unique = Array.from(new Map(accounts.map(item => [item.email, item])).values());
-      respond({ ok: true, success: true, accounts: unique });
-    })().catch(error => respond({ ok: false, success: false, error: error.message }));
+    discoverAccounts().then(respond, error => respond({ ok: false, success: false, error: error.message }));
     return true;
   }
   if (action === 'state' || action === 'getConfig') {

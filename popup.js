@@ -11,7 +11,9 @@ async function discoverAccounts() {
     select.innerHTML = '';
     if (!response.accounts?.length) {
         select.innerHTML = '<option value="">未发现已打开的 Flow 账号</option>';
-        throw new Error('未发现已打开的 Flow 页面。请分别在三个账号的浏览器窗口中打开 Flow，再点击扫描。');
+        if (!response.scannedTabs) throw new Error('当前浏览器配置中没有打开的 Flow 页面，请先打开 https://flow.google.com 并登录。');
+        if (response.unreadableTabs) throw new Error('发现 Flow 页面但无法读取账号，请等待加载完成或刷新页面后重新扫描，并检查扩展的网站访问权限。');
+        throw new Error('Flow 页面未提供已登录账号，请确认登录完成后刷新 Flow，再重新扫描。');
     }
     response.accounts.forEach(account => {
         const option = document.createElement('option');
@@ -24,7 +26,7 @@ async function discoverAccounts() {
     select.value = response.accounts.some(a => a.email === current) ? current : response.accounts[0].email;
     document.getElementById('loginAccount').value = select.value;
     const selected = response.accounts.find(a => a.email === select.value);
-    selectedAccountBinding = selected ? { tabId: selected.tabId, windowId: selected.windowId } : null;
+    selectedAccountBinding = selected ? { sourceTabId: selected.tabId, sourceWindowId: selected.windowId } : null;
     return response.accounts;
 }
 
@@ -89,12 +91,14 @@ function getFormConfig() {
         throw new Error('刷新间隔必须在1-1440分钟之间');
     }
 
-    return { apiUrl, connectionToken, loginAccount, refreshInterval, ...(selectedAccountBinding || {}) };
+    return { apiUrl, connectionToken, loginAccount, refreshInterval, sourceTabId: selectedAccountBinding?.sourceTabId ?? null, sourceWindowId: selectedAccountBinding?.sourceWindowId ?? null };
 }
 
 function setBusy(busy) {
     document.getElementById('saveBtn').disabled = busy;
     document.getElementById('testBtn').disabled = busy;
+    document.getElementById('discoverBtn').disabled = busy;
+    document.getElementById('accountSelect').disabled = busy;
 }
 
 function renderLastSync(lastSync) {
@@ -151,19 +155,31 @@ async function loadConfig() {
     document.getElementById('apiUrl').value = config.apiUrl || '';
     document.getElementById('connectionToken').value = config.connectionToken || '';
     document.getElementById('loginAccount').value = config.loginAccount || '';
-    selectedAccountBinding = config.sourceTabId ? { tabId: config.sourceTabId, windowId: config.sourceWindowId } : null;
+    selectedAccountBinding = Number.isInteger(config.sourceTabId) ? { sourceTabId: config.sourceTabId, sourceWindowId: config.sourceWindowId } : null;
     document.getElementById('refreshInterval').value = config.refreshInterval || 60;
     approvedInsecureOrigin = response.config.insecureHttpOrigin || '';
-    renderLastSync(response.lastSync);
+    renderLastSync(config.lastSync);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-    document.getElementById('discoverBtn').addEventListener('click', async () => { try { await discoverAccounts(); showStatus('已发现并选择 Flow 账号', 'success'); } catch (e) { showStatus(e.message, 'error', false); } });
+    document.getElementById('discoverBtn').addEventListener('click', async () => {
+        setBusy(true);
+        showStatus('正在扫描已打开的 Flow 页面…', 'info', false);
+        try {
+            const accounts = await discoverAccounts();
+            showStatus(`已发现 ${accounts.length} 个 Flow 账号，请选择后保存配置`, 'success');
+        } catch (e) { showStatus(e.message, 'error', false); }
+        finally { setBusy(false); }
+    });
+    document.getElementById('loginAccount').addEventListener('input', () => {
+        selectedAccountBinding = null;
+        document.getElementById('accountSelect').value = '';
+    });
     document.getElementById('accountSelect').addEventListener('change', e => {
         if (!e.target.value) return;
         document.getElementById('loginAccount').value = e.target.value;
         const option = e.target.selectedOptions[0];
-        selectedAccountBinding = { tabId: Number(option.dataset.tabId), windowId: Number(option.dataset.windowId) };
+        selectedAccountBinding = { sourceTabId: Number(option.dataset.tabId), sourceWindowId: Number(option.dataset.windowId) };
     });
     try {
         await loadConfig();

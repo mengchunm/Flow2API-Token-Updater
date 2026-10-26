@@ -1,6 +1,11 @@
+// 重复注入时只注册一次；支持扩展更新后恢复已打开页面的消息处理。
+(() => {
+if (globalThis.__gflowSessionListenerInstalled) return;
+globalThis.__gflowSessionListenerInstalled = true;
+
 // 只读取 Google Flow 已加载的认证字段，不执行创作，不读取其他网站。
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
-  if (sender.id !== chrome.runtime.id || !['gflow-page-session', 'gflow-credit-check'].includes(request.action)) return false;
+  if (sender.id !== chrome.runtime.id || !['gflow-discover-account', 'gflow-page-session', 'gflow-credit-check'].includes(request.action)) return false;
   const source = Array.from(document.scripts).map(script => script.textContent || '').join('\n');
   function jsonString(key) {
     const pattern = new RegExp('"' + key + '"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")');
@@ -62,3 +67,5 @@ async function checkFlowCredits({at,sid,bl}) {
     return diagnostic;
   } finally { clearTimeout(timer); }
 }
+
+})();
