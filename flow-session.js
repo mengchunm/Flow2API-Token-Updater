@@ -5,7 +5,25 @@ globalThis.__gflowSessionListenerInstalled = true;
 
 // 只读取 Google Flow 已加载的认证字段，不执行创作，不读取其他网站。
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
-  if (sender.id !== chrome.runtime.id || !['gflow-discover-account', 'gflow-page-session', 'gflow-credit-check'].includes(request.action)) return false;
+  if (sender.id !== chrome.runtime.id || !['gflow-account-links', 'gflow-discover-account', 'gflow-page-session', 'gflow-credit-check'].includes(request.action)) return false;
+  if (request.action === 'gflow-account-links') {
+    const accounts = [];
+    for (const link of document.querySelectorAll('a[href]')) {
+      try {
+        const url = new URL(link.href, location.href);
+        if (!['https://flow.google.com', 'https://accounts.google.com'].includes(url.origin)) continue;
+        const target = url.origin === 'https://flow.google.com' ? url : new URL(url.searchParams.get('continue') || 'https://flow.google.com/projects');
+        if (target.origin !== 'https://flow.google.com') continue;
+        const selector = url.searchParams.get('authuser') || target.searchParams.get('authuser');
+        if (!selector) continue;
+        const text = String(link.textContent || '') + ' ' + String(link.getAttribute('aria-label') || '');
+        const email = (selector.includes('@') ? selector : text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0] || '').trim().toLowerCase();
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) accounts.push({email});
+      } catch (_) {}
+    }
+    respond({ accounts });
+    return false;
+  }
   const source = Array.from(document.scripts).map(script => script.textContent || '').join('\n');
   function jsonString(key) {
     const pattern = new RegExp('"' + key + '"\\s*:\\s*("(?:[^"\\\\]|\\\\.)*")');
@@ -22,7 +40,7 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
   // 认证参数只回传给本扩展并提交到用户配对的本机接口，不写入日志或存储。
   if (request.action === 'gflow-credit-check') {
     if (!matches || !at || !sid || !bl) { respond({success:false, phase:'identity'}); return false; }
-    checkFlowCredits({at,sid,bl}).then(respond, () => respond({success:false,phase:'network'}));
+    checkFlowCredits({at,sid,bl,email}).then(respond, () => respond({success:false,phase:'network'}));
     return true;
   }
   respond({signed_in:signedIn, account_matches:matches,
@@ -31,11 +49,11 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
 });
 
 // 固定为只读额度 RPC，不接受任意 URL、方法或业务参数。
-async function checkFlowCredits({at,sid,bl}) {
+async function checkFlowCredits({at,sid,bl,email}) {
   const url = new URL('/_/AiSandboxAngularFrontend/data/batchexecute', 'https://flow.google.com');
   url.search = new URLSearchParams({rpcids:'nzlxg', 'source-path':location.pathname,
     bl,'f.sid':sid,hl:'en',_reqid:String(Math.floor(Math.random()*80000)+10000),rt:'c'});
-  const authuser = new URL(location.href).searchParams.get('authuser');
+  const authuser = email || new URL(location.href).searchParams.get('authuser');
   if (authuser) url.searchParams.set('authuser', authuser);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);

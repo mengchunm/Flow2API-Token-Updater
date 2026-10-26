@@ -146,7 +146,8 @@ async function waitForTabReady(tabId, maxWaitMs = 15000) {
 async function sendFlowMessage(tabId, message) {
   try {
     const response = await chrome.tabs.sendMessage(tabId, message);
-    if ((response && typeof response.signed_in === 'boolean')
+    if ((message.action === 'gflow-account-links' && Array.isArray(response?.accounts))
+        || (response && typeof response.signed_in === 'boolean')
         || (message.action === 'gflow-credit-check' && typeof response?.success === 'boolean')) return response;
   } catch (_) {}
   await chrome.scripting.executeScript({ target: { tabId }, files: ['flow-session.js'] });
@@ -172,6 +173,70 @@ function parseGoogleAccounts(text) {
     try { emails.push(validateEmail(row[3])); } catch (_) {}
   }
   return [...new Set(emails)];
+}
+
+const ACCOUNT_CHOOSER_URL = 'https://accounts.google.com/AccountChooser?continue=https%3A%2F%2Fflow.google.com%2F';
+
+// 此函数在 Google 账号选择页的隔离环境执行，仅读取账号条目或点击指定邮箱。
+function inspectAccountChooser(targetEmail = '') {
+  if (location.origin !== 'https://accounts.google.com' || !location.pathname.startsWith('/AccountChooser')) {
+    return { accounts: [], clicked: false };
+  }
+  const accounts = new Map();
+  for (const element of document.querySelectorAll('[data-identifier], [data-email]')) {
+    const email = String(element.getAttribute('data-identifier') || element.getAttribute('data-email') || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue;
+    if (!accounts.has(email)) accounts.set(email, element);
+  }
+  if (targetEmail) {
+    const element = accounts.get(targetEmail);
+    if (element) {
+      const control = element.closest('[role="link"], [role="button"], a, button') || element;
+      control.click();
+      return { accounts: [...accounts.keys()], clicked: true };
+    }
+  }
+  return { accounts: [...accounts.keys()], clicked: false };
+}
+
+async function readChooser(tabId, email = '') {
+  const results = await chrome.scripting.executeScript({ target: { tabId }, func: inspectAccountChooser, args: [email] });
+  return results?.[0]?.result || { accounts: [], clicked: false };
+}
+
+async function discoverChooserAccounts() {
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: ACCOUNT_CHOOSER_URL, active: false });
+    if (!await waitForTabReady(tab.id, 30000)) return [];
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const result = await readChooser(tab.id);
+      if (result.accounts.length) return result.accounts.map(validateEmail);
+      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return [];
+  } finally { await closeTemporaryTab(tab); }
+}
+
+async function switchViaChooser(tabId, email) {
+  if (!await waitForTabReady(tabId, 30000)) throw new Error('Google 账号选择页加载超时');
+  let selected;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    selected = await readChooser(tabId, email);
+    if (selected.clicked) break;
+    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  if (!selected?.clicked) {
+    // 选择页自动跳转或结构不兼容时使用 Google 的账号选择参数，随后仍严格验证邮箱。
+    await chrome.tabs.update(tabId, { url: flowAccountUrl(email) });
+  }
+  const started = Date.now();
+  while (Date.now() - started < 30000) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete' && new URL(tab.url || ACCOUNT_CHOOSER_URL).origin === 'https://flow.google.com') return;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('账号切换未进入 Flow，可能需要重新登录或完成验证');
 }
 
 async function listGoogleAccounts() {
@@ -226,18 +291,27 @@ async function executeDiscovery() {
     tabs = [tab];
     openedFlow = true;
   }
+  const chooserPromise = discoverChooserAccounts().catch(() => []);
   const listPromise = listGoogleAccounts().then(emails => ({ emails, available: true }), () => ({ emails: [], available: false }));
   const results = await Promise.all(tabs.map(async tab => {
     try {
       const account = await readFlowAccount(tab.id);
-      return { account };
+      let linked = [];
+      try { linked = (await sendFlowMessage(tab.id, { action: 'gflow-account-links' })).accounts || []; } catch (_) {}
+      return { account, linked };
     } catch (error) { return { error: error.message }; }
   }));
   const list = await listPromise;
-  const accounts = new Map(list.emails.map(email => [email, { email, verified: false }]));
-  for (const result of results) if (result.account) accounts.set(result.account.email, result.account);
+  const chooserEmails = await chooserPromise;
+  const accounts = new Map([...list.emails, ...chooserEmails].map(email => [email, { email, verified: false }]));
+  for (const result of results) {
+    for (const linked of result.linked || []) {
+      try { const email = validateEmail(linked.email); if (!accounts.has(email)) accounts.set(email, { email, verified: false }); } catch (_) {}
+    }
+    if (result.account) accounts.set(result.account.email, result.account);
+  }
   const response = { ok: true, success: true, accounts: [...accounts.values()], scannedTabs: tabs.length,
-    openedFlow, accountListAvailable: list.available,
+    openedFlow, accountListAvailable: list.available, chooserAccountCount: chooserEmails.length,
     unreadableTabs: results.filter(item => item.error).length,
     message: results.find(item => item.error)?.error || '' };
   await chrome.storage.local.set({ accountDiscovery: response });
@@ -282,11 +356,11 @@ async function readObservedFlowCookies(tabId, email) {
   }
 }
 
-async function executeSync() {
+async function executeSync(accountEmail = null) {
   const { config } = await chrome.storage.local.get('config');
   if (!config) throw new Error('请先从 GFlow 复制配置并保存');
   const connection = validateConnection(config);
-  const loginAccount = validateEmail(config.loginAccount);
+  const loginAccount = validateEmail(accountEmail || config.loginAccount);
 
   await Logger.info('开始同步 GFlow 登录凭据...', { account: loginAccount });
 
@@ -319,8 +393,9 @@ async function executeSync() {
   try {
     if (chrome.tabs?.create && chrome.tabs?.get) {
       await Logger.info('正在后台刷新 Flow 登录态…');
-      tempTab = await chrome.tabs.create({ url: pageUrl, active: false,
+      tempTab = await chrome.tabs.create({ url: accountEmail ? ACCOUNT_CHOOSER_URL : pageUrl, active: false,
         ...(Number.isInteger(sourceTab?.windowId) ? { windowId: sourceTab.windowId } : {}) });
+      if (accountEmail) await switchViaChooser(tempTab.id, loginAccount);
       const loadedTab = await waitForTabReady(tempTab.id);
       if (!loadedTab) throw new Error('Flow 页面加载超时，请确认网页可以正常打开后重试');
       if (new URL(loadedTab.url || '').hostname !== 'flow.google.com') {
@@ -337,6 +412,7 @@ async function executeSync() {
         frontend = session.frontend;
         observed = await readObservedFlowCookies(tempTab.id, loginAccount);
         await Logger.info('Flow 浏览器额度检查完成', observed.diagnostic);
+        if (!observed.diagnostic.success) throw new Error('所选账号的 Flow 额度检查未通过，已停止本账号同步');
       }
       // 根据实际预热标签确定存储区；定时同步没有活动标签时也保持一致。
       if (chrome.cookies?.getAllCookieStores) {
@@ -422,12 +498,36 @@ async function executeSync() {
   }
 }
 
-function syncNow() {
+async function executeBatchSync() {
+  const { config } = await chrome.storage.local.get('config');
+  if (!config) throw new Error('请先保存服务地址和连接 Token');
+  validateConnection(config);
+  const discovery = await discoverAccounts();
+  if (!discovery.accounts.length) throw new Error(discovery.message || '未发现可切换账号，请在 Flow 完成登录后重试');
+  const results = [];
+  const batchState = { running: true, total: discovery.accounts.length, completed: 0, results };
+  await chrome.storage.local.set({ batchSync: { ...batchState, startedAt: Date.now() } });
+  for (const account of discovery.accounts) {
+    let result;
+    try {
+      // executeSync 为每个邮箱创建独立临时页面，校验实际身份后才读取请求 Cookie。
+      result = await executeSync(account.email);
+    } catch (error) { result = { success: false, message: error.message }; }
+    results.push({ email: account.email, success: result.success, message: result.message });
+    await chrome.storage.local.set({ batchSync: { ...batchState, completed: results.length, results: [...results] } });
+  }
+  const succeeded = results.filter(item => item.success).length;
+  await chrome.storage.local.set({ batchSync: { ...batchState, running: false, completed: results.length, results, finishedAt: Date.now() } });
+  return { success: succeeded === results.length, results,
+    message: `共 ${results.length} 个账号，成功 ${succeeded} 个，失败 ${results.length - succeeded} 个` };
+}
+
+function syncNow(allAccounts = false) {
   if (activeSync) return activeSync;
   activeSync = (async () => {
     let result;
     try {
-      result = await executeSync();
+      result = await (allAccounts ? executeBatchSync() : executeSync());
     } catch (error) {
       result = { success: false, message: error.message };
     }
@@ -461,6 +561,10 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
   }
   if (action === 'save' || action === 'saveConfig') {
     saveConfiguration(request.config).then(result => respond({ ok: true, success: true, result, config: result }), e => respond({ ok: false, success: false, message: e.message, error: e.message }));
+    return true;
+  }
+  if (action === 'syncAll') {
+    syncNow(true).then(result => respond(result), error => respond({ success: false, message: error.message }));
     return true;
   }
   if (action === 'sync' || action === 'testNow') {

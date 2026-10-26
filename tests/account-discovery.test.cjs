@@ -33,6 +33,7 @@ function background(tabs, sendMessage, config = {}, overrides = {}) {
       create: async details => { const tab = { id: 100 + created.length, windowId: 10, ...details }; created.push(tab); return tab; }
     },
     scripting: { executeScript: async details => {
+      if (details.func) return [{result: {accounts: [], clicked: false}}];
       assert.equal(details.files[0], 'flow-session.js');
       injections++;
     } },
@@ -87,7 +88,7 @@ test('scan distinguishes no tabs, signed-out pages and unreadable pages', async 
   const empty = background([], async () => ({ signed_in: true, email: 'user@example.com' }));
   const opened = await empty.run('discoverAccounts()');
   assert.equal(opened.openedFlow, true);
-  assert.equal(empty.created.length, 1);
+  assert.equal(empty.created.filter(tab => tab.url.includes('flow.google.com/projects')).length, 1);
   assert.equal(opened.accounts[0].email, 'user@example.com');
   const bg = background([{ id: 1 }, { id: 2 }], async id => {
     if (id === 1) return { signed_in: false, email: '' };
@@ -162,7 +163,7 @@ test('selecting an account rejects Google falling back to the default account', 
 test('simultaneous discovery requests share the same task and opening', async () => {
   const bg = background([], async () => ({ signed_in: true, email: 'one@example.com' }));
   await bg.run('Promise.all([discoverAccounts(), discoverAccounts()])');
-  assert.equal(bg.created.length, 1);
+  assert.equal(bg.created.filter(tab => tab.url.includes('flow.google.com/projects')).length, 1);
 });
 
 test('popup only binds the selected account after Flow confirms its identity', async () => {
@@ -180,4 +181,36 @@ test('popup only binds the selected account after Flow confirms its identity', a
   await assert.rejects(vm.runInContext('chooseAccount("three@example.com")', context), /login required/);
   assert.equal(vm.runInContext('selectedAccountBinding', context), null);
   assert.equal(elements.loginAccount.value, 'two@example.com');
+});
+
+
+test('AccountChooser reads only account attributes and clicks only the requested account', () => {
+  const bg = background([], async () => {});
+  const inspect = bg.run('inspectAccountChooser.toString()');
+  let clicked = '';
+  const row = email => ({ getAttribute: key => key === 'data-identifier' ? email : null,
+    closest: () => ({ click: () => { clicked = email; } }) });
+  const context = vm.createContext({ location: { origin: 'https://accounts.google.com', pathname: '/AccountChooser' },
+    document: { querySelectorAll: () => [row('one@example.com'), row('two@example.com'), row('invalid')] } });
+  vm.runInContext(`const inspect = ${inspect}`, context);
+  assert.equal(vm.runInContext('inspect().accounts.length', context), 2);
+  assert.equal(clicked, '');
+  assert.equal(vm.runInContext('inspect("two@example.com").clicked', context), true);
+  assert.equal(clicked, 'two@example.com');
+  assert.equal(vm.runInContext('inspect("absent@example.com").clicked', context), false);
+});
+
+test('batch extraction is sequential and preserves individual failures', async () => {
+  const bg = background([], async () => {}, { apiUrl: 'https://example.com/api/plugin/update-token', connectionToken: 'test' });
+  bg.run(`globalThis.calls = [];
+    discoverAccounts = async () => ({ accounts: [{email:'one@example.com'}, {email:'two@example.com'}, {email:'three@example.com'}] });
+    executeSync = async email => { calls.push(email); if (email === 'two@example.com') throw new Error('identity mismatch'); return {success:true, message:'updated'}; };`);
+  const result = await bg.run('executeBatchSync()');
+  assert.equal(result.success, false);
+  assert.equal(result.results.length, 3);
+  assert.equal(result.results[1].success, false);
+  assert.equal(result.results[2].success, true);
+  assert.equal(bg.state.batchSync.running, false);
+  assert.equal(bg.state.batchSync.completed, 3);
+  assert.deepEqual(Array.from(bg.run('calls')), ['one@example.com', 'two@example.com', 'three@example.com']);
 });

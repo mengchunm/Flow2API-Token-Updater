@@ -107,6 +107,7 @@ function getFormConfig() {
 }
 
 function setBusy(busy) {
+    document.getElementById('syncAllBtn').disabled = busy;
     document.getElementById('saveBtn').disabled = busy;
     document.getElementById('testBtn').disabled = busy;
     document.getElementById('discoverBtn').disabled = busy;
@@ -248,6 +249,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         } finally {
             setBusy(false);
         }
+    });
+
+    document.getElementById('syncAllBtn').addEventListener('click', async () => {
+        setBusy(true);
+        showStatus('正在自动发现账号并逐个切换、提取和同步，关闭弹窗后任务仍会继续…', 'info', false);
+        try {
+            // 未填写邮箱时先识别当前 Flow 身份，用户无需手动选择。
+            if (!document.getElementById('loginAccount').value.trim()) await discoverAccounts();
+            await saveCurrentConfig();
+            const result = await sendMessage({ action: 'syncAll' });
+            showStatus(result?.message || '批量任务结束', result?.success ? 'success' : 'error', false);
+        } catch (error) { showStatus(error.message, 'error', false); }
+        finally { setBusy(false); }
+    });
+    function renderBatch(batch) {
+        const element = document.getElementById('batchState');
+        if (!batch) return;
+        element.style.display = 'block';
+        element.textContent = `${batch.running ? '正在逐账号提取' : '批量提取完成'}：${batch.completed}/${batch.total}
+`
+            + (batch.results || []).map(item => `${item.success ? '成功' : '失败'} · ${item.email} · ${item.message}`).join('\n');
+    }
+    chrome.storage.local.get('batchSync').then(state => renderBatch(state.batchSync));
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.batchSync) renderBatch(changes.batchSync.newValue);
     });
 
     document.getElementById('logsBtn').addEventListener('click', () => {
