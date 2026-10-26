@@ -117,7 +117,7 @@ test('popup sends selected tab binding using the backend field names', () => {
     addEventListener() {}, getElementById: id => ({ value: values[id] })
   } });
   vm.runInContext(source('popup.js'), context);
-  const config = vm.runInContext('selectedAccountBinding = { sourceTabId: 12, sourceWindowId: 34 }; getFormConfig()', context);
+  const config = vm.runInContext('selectedEmail = "user@example.com"; selectedAccountBinding = { sourceTabId: 12, sourceWindowId: 34 }; getFormConfig()', context);
   assert.equal(config.sourceTabId, 12);
   assert.equal(config.sourceWindowId, 34);
   assert.equal(config.tabId, undefined);
@@ -175,12 +175,12 @@ test('popup only binds the selected account after Flow confirms its identity', a
   } } } });
   vm.runInContext(source('popup.js'), context);
   await vm.runInContext('chooseAccount("two@example.com")', context);
-  assert.equal(elements.loginAccount.value, 'two@example.com');
+  assert.equal(vm.runInContext('selectedEmail', context), 'two@example.com');
   assert.equal(vm.runInContext('selectedAccountBinding.sourceTabId', context), 100);
   vm.runInContext('chrome.runtime.sendMessage = (request, callback) => callback({success: false, error: "login required"})', context);
   await assert.rejects(vm.runInContext('chooseAccount("three@example.com")', context), /login required/);
   assert.equal(vm.runInContext('selectedAccountBinding', context), null);
-  assert.equal(elements.loginAccount.value, 'two@example.com');
+  assert.equal(vm.runInContext('selectedEmail', context), 'two@example.com');
 });
 
 
@@ -224,7 +224,7 @@ test('background discovery refreshes dropdown from one to two accounts without s
     addEventListener() {}, getElementById: id => elements[id], createElement: () => ({})
   } });
   vm.runInContext(source('popup.js'), context);
-  vm.runInContext(`selectedAccountBinding = {sourceTabId: 12, sourceWindowId: 10};
+  vm.runInContext(`selectedEmail = 'one@example.com'; selectedAccountBinding = {sourceTabId: 12, sourceWindowId: 10};
     renderAccounts({accounts:[{email:'one@example.com',verified:true}]});`, context);
   assert.equal(select.options.length, 1);
   vm.runInContext(`handleStorageChanges({accountDiscovery:{newValue:{accounts:[

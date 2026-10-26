@@ -3,6 +3,7 @@
 let statusTimer = null;
 let approvedInsecureOrigin = '';
 let selectedAccountBinding = null;
+let selectedEmail = '';
 
 let discoveredAccounts = [];
 
@@ -11,7 +12,7 @@ function renderAccounts(response) {
         .filter(account => account && account.email)
         .map(account => [account.email, account])).values());
     const select = document.getElementById('accountSelect');
-    const previous = select.value || document.getElementById('loginAccount').value.trim().toLowerCase();
+    const previous = select.value || selectedEmail;
     select.innerHTML = '<option value="">请选择账号</option>';
     for (const account of discoveredAccounts) {
         const option = document.createElement('option');
@@ -45,7 +46,7 @@ async function chooseAccount(email) {
     const account = response.account;
     if (account.email !== email) throw new Error('Flow 账号验证不一致，请重试');
     selectedAccountBinding = { sourceTabId: account.tabId, sourceWindowId: account.windowId };
-    document.getElementById('loginAccount').value = account.email;
+    selectedEmail = account.email;
     document.getElementById('accountSelect').value = account.email;
 }
 
@@ -54,7 +55,7 @@ async function discoverAccounts() {
     if (!response?.success) throw new Error(response?.error || '账号扫描失败');
     const accounts = renderAccounts(response);
     if (!accounts.length) throw new Error(response.message || '已自动打开 Flow，请完成登录后重新扫描。');
-    const current = document.getElementById('loginAccount').value.trim().toLowerCase();
+    const current = selectedEmail;
     const selected = accounts.find(account => account.email === current)
         || accounts.find(account => account.verified) || accounts[0];
     await chooseAccount(selected.email);
@@ -106,7 +107,7 @@ function insecureRemoteOrigin(value) {
 function getFormConfig() {
     const apiUrl = normalizeApiUrl(document.getElementById('apiUrl').value);
     const connectionToken = document.getElementById('connectionToken').value.trim();
-    const loginAccount = document.getElementById('loginAccount').value.trim().toLowerCase();
+    const loginAccount = selectedEmail;
     const syncMode = document.getElementById('syncMode')?.value || 'all';
     const autoSync = document.getElementById('autoSync')?.checked !== false;
     const refreshInterval = Number.parseInt(
@@ -118,7 +119,7 @@ function getFormConfig() {
         throw new Error('请输入连接Token');
     }
     if ((loginAccount || syncMode === 'single') && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginAccount)) {
-        throw new Error('请输入有效的Google账号邮箱');
+        throw new Error('请先扫描并选择要同步的 Google 账号');
     }
     if (!Number.isInteger(refreshInterval) || refreshInterval < 1 || refreshInterval > 1440) {
         throw new Error('刷新间隔必须在1-1440分钟之间');
@@ -175,7 +176,7 @@ async function saveCurrentConfig() {
         throw new Error(response && response.error || '配置保存失败');
     }
     document.getElementById('apiUrl').value = response.config.apiUrl;
-    document.getElementById('loginAccount').value = response.config.loginAccount;
+    selectedEmail = response.config.loginAccount || '';
     return response.config;
 }
 
@@ -187,7 +188,8 @@ async function loadConfig() {
     const config = response.config || {};
     document.getElementById('apiUrl').value = config.apiUrl || '';
     document.getElementById('connectionToken').value = config.connectionToken || '';
-    document.getElementById('loginAccount').value = config.loginAccount || '';
+    selectedEmail = config.loginAccount || '';
+    if (selectedEmail && !discoveredAccounts.length) renderAccounts({ accounts: [{email: selectedEmail, verified: false}] });
     selectedAccountBinding = Number.isInteger(config.sourceTabId) ? { sourceTabId: config.sourceTabId, sourceWindowId: config.sourceWindowId } : null;
     document.getElementById('refreshInterval').value = config.refreshInterval || 60;
     document.getElementById('syncMode').value = config.syncMode || 'all';
@@ -206,10 +208,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch (e) { showStatus(e.message, 'error', false); }
         finally { setBusy(false); }
     });
-    document.getElementById('loginAccount').addEventListener('input', () => {
-        selectedAccountBinding = null;
-        document.getElementById('accountSelect').value = '';
-    });
     document.getElementById('accountSelect').addEventListener('change', async e => {
         const email = e.target.value;
         if (!email) return;
@@ -224,9 +222,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
         await loadConfig();
         const { accountDiscovery } = await chrome.storage.local.get('accountDiscovery');
-        if (!discoveredAccounts.length && accountDiscovery?.accounts?.length) {
+        if (accountDiscovery?.accounts?.length) {
             renderAccounts(accountDiscovery);
-            document.getElementById('accountSelect').value = document.getElementById('loginAccount').value;
+            document.getElementById('accountSelect').value = selectedEmail;
         }
     } catch (error) {
         showStatus(`配置读取失败：${error.message}`, 'error', false);
