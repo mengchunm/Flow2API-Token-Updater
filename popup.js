@@ -7,8 +7,11 @@ let selectedAccountBinding = null;
 let discoveredAccounts = [];
 
 function renderAccounts(response) {
-    discoveredAccounts = response.accounts || [];
+    discoveredAccounts = Array.from(new Map((response.accounts || [])
+        .filter(account => account && account.email)
+        .map(account => [account.email, account])).values());
     const select = document.getElementById('accountSelect');
+    const previous = select.value || document.getElementById('loginAccount').value.trim().toLowerCase();
     select.innerHTML = '<option value="">请选择账号</option>';
     for (const account of discoveredAccounts) {
         const option = document.createElement('option');
@@ -16,7 +19,17 @@ function renderAccounts(response) {
         option.textContent = account.email + (account.verified ? ' · Flow 已确认' : ' · 切换后验证');
         select.appendChild(option);
     }
+    // 更新列表不自动触发切换，也不覆盖用户已经保存的页面绑定。
+    select.value = discoveredAccounts.some(account => account.email === previous) ? previous : '';
+    const count = document.getElementById('accountCount');
+    if (count) count.textContent = `已发现 ${discoveredAccounts.length} 个账号（其中 ${discoveredAccounts.filter(account => account.verified).length} 个 Flow 已确认）`;
     return discoveredAccounts;
+}
+
+function handleStorageChanges(changes, area) {
+    if (area === 'local' && changes.accountDiscovery) {
+        renderAccounts(changes.accountDiscovery.newValue || { accounts: [] });
+    }
 }
 
 async function chooseAccount(email) {
@@ -202,7 +215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
         await loadConfig();
         const { accountDiscovery } = await chrome.storage.local.get('accountDiscovery');
-        if (accountDiscovery?.accounts?.length) {
+        if (!discoveredAccounts.length && accountDiscovery?.accounts?.length) {
             renderAccounts(accountDiscovery);
             document.getElementById('accountSelect').value = document.getElementById('loginAccount').value;
         }
@@ -272,6 +285,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             + (batch.results || []).map(item => `${item.success ? '成功' : '失败'} · ${item.email} · ${item.message}`).join('\n');
     }
     chrome.storage.local.get('batchSync').then(state => renderBatch(state.batchSync));
+    chrome.storage.onChanged.addListener(handleStorageChanges);
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'local' && changes.batchSync) renderBatch(changes.batchSync.newValue);
     });

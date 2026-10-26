@@ -214,3 +214,26 @@ test('batch extraction is sequential and preserves individual failures', async (
   assert.equal(bg.state.batchSync.completed, 3);
   assert.deepEqual(Array.from(bg.run('calls')), ['one@example.com', 'two@example.com', 'three@example.com']);
 });
+
+test('background discovery refreshes dropdown from one to two accounts without switching selection', () => {
+  const select = { value: 'one@example.com', options: [],
+    set innerHTML(value) { this.options = []; },
+    appendChild(option) { this.options.push(option); } };
+  const elements = { accountSelect: select, loginAccount: { value: 'one@example.com' }, accountCount: { textContent: '' } };
+  const context = vm.createContext({ URL, setTimeout, clearTimeout, document: {
+    addEventListener() {}, getElementById: id => elements[id], createElement: () => ({})
+  } });
+  vm.runInContext(source('popup.js'), context);
+  vm.runInContext(`selectedAccountBinding = {sourceTabId: 12, sourceWindowId: 10};
+    renderAccounts({accounts:[{email:'one@example.com',verified:true}]});`, context);
+  assert.equal(select.options.length, 1);
+  vm.runInContext(`handleStorageChanges({accountDiscovery:{newValue:{accounts:[
+    {email:'one@example.com',verified:true},{email:'two@example.com',verified:false}]}}}, 'local')`, context);
+  assert.equal(select.options.length, 2);
+  assert.equal(select.options[1].value, 'two@example.com');
+  assert.equal(select.value, 'one@example.com');
+  assert.match(elements.accountCount.textContent, /2 个账号/);
+  assert.equal(vm.runInContext('selectedAccountBinding.sourceTabId', context), 12);
+  vm.runInContext(`handleStorageChanges({accountDiscovery:{newValue:{accounts:[]}}}, 'sync')`, context);
+  assert.equal(select.options.length, 2);
+});
