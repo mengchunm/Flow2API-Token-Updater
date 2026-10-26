@@ -23,6 +23,12 @@ function renderAccounts(response) {
     select.value = discoveredAccounts.some(account => account.email === previous) ? previous : '';
     const count = document.getElementById('accountCount');
     if (count) count.textContent = `已发现 ${discoveredAccounts.length} 个账号（其中 ${discoveredAccounts.filter(account => account.verified).length} 个 Flow 已确认）`;
+    const diagnostic = document.getElementById('accountDiagnostic');
+    if (diagnostic) {
+        const d = response.diagnostics;
+        const statuses = { chooser: '已读取', redirected: '已跳转，未停留在账号列表', unreadable: '无法读取', timeout: '加载超时' };
+        diagnostic.textContent = d ? `选择器：${statuses[d.chooserStatus] || d.chooserStatus}，${d.chooserEntries} 个条目 / ${d.chooserAccounts} 个邮箱；Google 列表：${d.googleListStatus === 'ok' ? d.googleListAccounts + ' 个' : '不可用'}；Flow 页面：${d.flowAccounts} 个。` : '';
+    }
     return discoveredAccounts;
 }
 

@@ -179,13 +179,24 @@ const ACCOUNT_CHOOSER_URL = 'https://accounts.google.com/AccountChooser?continue
 
 // 此函数在 Google 账号选择页的隔离环境执行，仅读取账号条目或点击指定邮箱。
 function inspectAccountChooser(targetEmail = '') {
-  if (location.origin !== 'https://accounts.google.com' || !location.pathname.startsWith('/AccountChooser')) {
-    return { accounts: [], clicked: false };
+  if (location.origin !== 'https://accounts.google.com'
+      || !/(?:^|\/)accountchooser(?:\/|$)/i.test(location.pathname)) {
+    return { accounts: [], clicked: false, page: 'redirected', entries: 0 };
   }
   const accounts = new Map();
-  for (const element of document.querySelectorAll('[data-identifier], [data-email]')) {
-    const email = String(element.getAttribute('data-identifier') || element.getAttribute('data-email') || '').trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue;
+  const entries = document.querySelectorAll('[data-identifier], [data-email], [data-email-address], [data-authuser], [data-profileindex]');
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  for (const element of entries) {
+    let email = ['data-identifier', 'data-email', 'data-email-address']
+      .map(key => String(element.getAttribute(key) || '').trim().toLowerCase())
+      .find(value => emailPattern.test(value));
+    if (!email) {
+      const text = String(element.textContent || '') + ' ' + String(element.getAttribute('aria-label') || '');
+      const matches = [...text.matchAll(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi)];
+      const emails = [...new Set(matches.map(match => match[0].toLowerCase()))];
+      if (emails.length === 1) email = emails[0];
+    }
+    if (!email || !emailPattern.test(email)) continue;
     if (!accounts.has(email)) accounts.set(email, element);
   }
   if (targetEmail) {
@@ -193,28 +204,40 @@ function inspectAccountChooser(targetEmail = '') {
     if (element) {
       const control = element.closest('[role="link"], [role="button"], a, button') || element;
       control.click();
-      return { accounts: [...accounts.keys()], clicked: true };
+      return { accounts: [...accounts.keys()], clicked: true, page: 'chooser', entries: entries.length };
     }
   }
-  return { accounts: [...accounts.keys()], clicked: false };
+  return { accounts: [...accounts.keys()], clicked: false, page: 'chooser', entries: entries.length };
 }
 
 async function readChooser(tabId, email = '') {
   const results = await chrome.scripting.executeScript({ target: { tabId }, func: inspectAccountChooser, args: [email] });
-  return results?.[0]?.result || { accounts: [], clicked: false };
+  return results?.[0]?.result || { accounts: [], clicked: false, page: 'unreadable', entries: 0 };
 }
 
 async function discoverChooserAccounts() {
   let tab;
   try {
     tab = await chrome.tabs.create({ url: ACCOUNT_CHOOSER_URL, active: false });
-    if (!await waitForTabReady(tab.id, 30000)) return [];
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const result = await readChooser(tab.id);
-      if (result.accounts.length) return result.accounts.map(validateEmail);
-      if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 500));
+    if (!await waitForTabReady(tab.id, 30000)) return { emails: [], status: 'timeout', entries: 0 };
+    const accounts = new Set();
+    let lastGrowth = Date.now();
+    let lastResult;
+    // 等待账号列表稳定，不能在首个账号渲染后立即关闭页面。
+    for (let attempt = 0; attempt < 20; attempt++) {
+      lastResult = await readChooser(tab.id);
+      const before = accounts.size;
+      for (const email of lastResult.accounts || []) {
+        try { accounts.add(validateEmail(email)); } catch (_) {}
+      }
+      if (accounts.size !== before) lastGrowth = Date.now();
+      if (lastResult.page === 'redirected') break;
+      if (accounts.size && Date.now() - lastGrowth >= 2500) break;
+      if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 500));
     }
-    return [];
+    return { emails: [...accounts], status: lastResult?.page || 'unreadable', entries: lastResult?.entries || 0 };
+  } catch (_) {
+    return { emails: [], status: 'unreadable', entries: 0 };
   } finally { await closeTemporaryTab(tab); }
 }
 
@@ -291,7 +314,7 @@ async function executeDiscovery() {
     tabs = [tab];
     openedFlow = true;
   }
-  const chooserPromise = discoverChooserAccounts().catch(() => []);
+  const chooserPromise = discoverChooserAccounts();
   const listPromise = listGoogleAccounts().then(emails => ({ emails, available: true }), () => ({ emails: [], available: false }));
   const results = await Promise.all(tabs.map(async tab => {
     try {
@@ -302,7 +325,8 @@ async function executeDiscovery() {
     } catch (error) { return { error: error.message }; }
   }));
   const list = await listPromise;
-  const chooserEmails = await chooserPromise;
+  const chooser = await chooserPromise;
+  const chooserEmails = chooser.emails;
   const accounts = new Map([...list.emails, ...chooserEmails].map(email => [email, { email, verified: false }]));
   for (const result of results) {
     for (const linked of result.linked || []) {
@@ -312,9 +336,13 @@ async function executeDiscovery() {
   }
   const response = { ok: true, success: true, accounts: [...accounts.values()], scannedTabs: tabs.length,
     openedFlow, accountListAvailable: list.available, chooserAccountCount: chooserEmails.length,
+    diagnostics: { chooserStatus: chooser.status, chooserEntries: chooser.entries, chooserAccounts: chooserEmails.length,
+      googleListStatus: list.available ? 'ok' : 'unavailable', googleListAccounts: list.emails.length,
+      flowAccounts: results.filter(item => item.account).length },
     unreadableTabs: results.filter(item => item.error).length,
     message: results.find(item => item.error)?.error || '' };
   await chrome.storage.local.set({ accountDiscovery: response });
+  await Logger.info('账号扫描来源诊断', response.diagnostics);
   return response;
 }
 

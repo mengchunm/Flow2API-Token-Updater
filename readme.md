@@ -91,3 +91,8 @@ node --test tests/account-discovery.test.cjs
 ## 七、账号下拉框实时刷新（本地修复版 1.2.4）
 
 修复后台批量扫描更新 accountDiscovery 后，弹窗仅更新任务进度、不刷新账号下拉框的问题。账号列表变化时自动重绘，保留当前选择和页面绑定，并显示发现账号数与 Flow 已确认数。增加从单账号缓存更新到两个账号的回归测试。
+
+
+## 八、选择器兼容性与诊断（本地修复版 1.2.5）
+
+兼容 /AccountChooser 与 /v3/signin/accountchooser 等账号选择器路径，补充 data-email-address、data-authuser、data-profileindex 条目识别。等待账号列表至少稳定 2.5 秒，最多轮询 20 次，避免首个账号出现后立刻结束。弹窗与日志显示选择器状态、条目数、邮箱数以及 Google 列表和 Flow 来源数量，不保存页面 HTML 或认证信息。模拟测试覆盖新版路径及延迟出现的第二个账号；真实页面仍需现场验证。

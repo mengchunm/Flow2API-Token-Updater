@@ -237,3 +237,28 @@ test('background discovery refreshes dropdown from one to two accounts without s
   vm.runInContext(`handleStorageChanges({accountDiscovery:{newValue:{accounts:[]}}}, 'sync')`, context);
   assert.equal(select.options.length, 2);
 });
+
+test('modern Google v3 accountchooser supports email attributes and indexed account rows', () => {
+  const bg = background([], async () => {});
+  const inspect = bg.run('inspectAccountChooser.toString()');
+  const row = (attrs, textContent = '') => ({ textContent, getAttribute: key => attrs[key] || null, closest: () => null });
+  const context = vm.createContext({ location: { origin: 'https://accounts.google.com', pathname: '/v3/signin/accountchooser' },
+    document: { querySelectorAll: () => [
+      row({'data-email-address':'One@Example.com'}),
+      row({'data-authuser':'1'}, 'Account Two two@example.com'),
+      row({'data-authuser':'2'}, 'two@example.com other@example.com')
+    ] } });
+  vm.runInContext(`const inspect = ${inspect}`, context);
+  const result = vm.runInContext('inspect()', context);
+  assert.equal(result.page, 'chooser');
+  assert.deepEqual(Array.from(result.accounts), ['one@example.com', 'two@example.com']);
+});
+
+test('chooser discovery waits for a second account rendered after the first', async () => {
+  const bg = background([], async () => {});
+  bg.run(`globalThis.reads = 0; readChooser = async () => ({ page:'chooser', entries:2,
+    accounts: ++reads < 3 ? ['one@example.com'] : ['one@example.com','two@example.com'] });`);
+  const result = await bg.run('discoverChooserAccounts()');
+  assert.deepEqual(Array.from(result.emails), ['one@example.com','two@example.com']);
+  assert.ok(bg.run('reads') >= 3);
+});
