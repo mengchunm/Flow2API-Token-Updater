@@ -2,6 +2,31 @@
 
 let statusTimer = null;
 let approvedInsecureOrigin = '';
+let selectedAccountBinding = null;
+
+async function discoverAccounts() {
+    const response = await sendMessage({ action: 'discoverAccounts' });
+    if (!response || !response.success) throw new Error(response?.error || '账号扫描失败');
+    const select = document.getElementById('accountSelect');
+    select.innerHTML = '';
+    if (!response.accounts?.length) {
+        select.innerHTML = '<option value="">未发现已打开的 Flow 账号</option>';
+        throw new Error('未发现已打开的 Flow 页面。请分别在三个账号的浏览器窗口中打开 Flow，再点击扫描。');
+    }
+    response.accounts.forEach(account => {
+        const option = document.createElement('option');
+        option.value = account.email; option.textContent = account.email;
+        option.dataset.tabId = String(account.tabId || '');
+        option.dataset.windowId = String(account.windowId || '');
+        select.appendChild(option);
+    });
+    const current = document.getElementById('loginAccount').value;
+    select.value = response.accounts.some(a => a.email === current) ? current : response.accounts[0].email;
+    document.getElementById('loginAccount').value = select.value;
+    const selected = response.accounts.find(a => a.email === select.value);
+    selectedAccountBinding = selected ? { tabId: selected.tabId, windowId: selected.windowId } : null;
+    return response.accounts;
+}
 
 function sendMessage(request) {
     return new Promise((resolve, reject) => {
@@ -64,7 +89,7 @@ function getFormConfig() {
         throw new Error('刷新间隔必须在1-1440分钟之间');
     }
 
-    return { apiUrl, connectionToken, loginAccount, refreshInterval };
+    return { apiUrl, connectionToken, loginAccount, refreshInterval, ...(selectedAccountBinding || {}) };
 }
 
 function setBusy(busy) {
@@ -126,12 +151,20 @@ async function loadConfig() {
     document.getElementById('apiUrl').value = config.apiUrl || '';
     document.getElementById('connectionToken').value = config.connectionToken || '';
     document.getElementById('loginAccount').value = config.loginAccount || '';
+    selectedAccountBinding = config.sourceTabId ? { tabId: config.sourceTabId, windowId: config.sourceWindowId } : null;
     document.getElementById('refreshInterval').value = config.refreshInterval || 60;
     approvedInsecureOrigin = response.config.insecureHttpOrigin || '';
     renderLastSync(response.lastSync);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    document.getElementById('discoverBtn').addEventListener('click', async () => { try { await discoverAccounts(); showStatus('已发现并选择 Flow 账号', 'success'); } catch (e) { showStatus(e.message, 'error', false); } });
+    document.getElementById('accountSelect').addEventListener('change', e => {
+        if (!e.target.value) return;
+        document.getElementById('loginAccount').value = e.target.value;
+        const option = e.target.selectedOptions[0];
+        selectedAccountBinding = { tabId: Number(option.dataset.tabId), windowId: Number(option.dataset.windowId) };
+    });
     try {
         await loadConfig();
     } catch (error) {

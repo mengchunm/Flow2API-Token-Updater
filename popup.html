@@ -155,7 +155,7 @@
 
     <div class="form-group">
         <label for="apiUrl">连接接口</label>
-        <input type="text" id="apiUrl" placeholder="http://127.0.0.1:8000/api/plugin/update-token">
+        <input type="text" id="apiUrl" placeholder="https://flow2api.saevio.top/api/plugin/update-token">
         <div class="hint">从Flow2API管理后台的"插件连接配置"中复制</div>
     </div>
 
@@ -167,8 +167,9 @@
 
     <div class="form-group">
         <label for="loginAccount">Google账号</label>
-        <input type="email" id="loginAccount" placeholder="name@example.com" required>
-        <div class="hint">用于稳定更新同一账号，避免Cookie变化后被识别为新账号</div>
+        <div style="display:flex;gap:8px"><select id="accountSelect" style="flex:1;padding:8px 12px;border:1px solid #ddd;border-radius:4px;font-size:14px"><option value="">先扫描当前 Flow 页面</option></select><button type="button" class="btn-secondary" id="discoverBtn" style="flex:0 0 auto;padding:8px 10px">扫描</button></div>
+        <input type="email" id="loginAccount" placeholder="也可手动填写 name@example.com" required style="margin-top:8px">
+        <div class="hint">扫描当前已打开的 Flow 页面，从页面实际登录态中选择邮箱。</div>
     </div>
 
     <div class="form-group">

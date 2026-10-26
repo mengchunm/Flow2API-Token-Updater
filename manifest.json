@@ -1,18 +1,20 @@
 {
   "manifest_version": 3,
   "name": "Flow2API Token Updater",
-  "version": "1.3.1",
+  "version": "1.2.0",
   "description": "自动提取Google Flow登录Cookie并更新到Flow2API系统",
   "permissions": [
-    "cookies",
     "alarms",
+    "cookies",
+    "notifications",
     "storage",
     "tabs",
-    "notifications"
+    "webRequest"
   ],
   "host_permissions": [
-    "https://google.com/*",
-    "https://*.google.com/*"
+    "https://*.google.com/*",
+    "https://flow.google.com/*",
+    "https://google.com/*"
   ],
   "optional_host_permissions": [
     "http://*/*",
@@ -33,5 +35,16 @@
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://flow.google.com/*"
+      ],
+      "js": [
+        "flow-session.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
