@@ -4,6 +4,7 @@
 const ALARM = 'tokenRefresh';
 const FLOW_URL = 'https://flow.google.com/projects';
 let activeSync = null;
+let activeDiscovery = null;
 
 // 日志系统
 const Logger = {
@@ -96,6 +97,7 @@ async function publicState() {
     apiUrl: config.apiUrl || '',
     sourceTabId: config.sourceTabId ?? null,
     sourceWindowId: config.sourceWindowId ?? null,
+    sourceUrl: config.sourceUrl || '',
     autoSync: config.autoSync !== false,
     lastSync: state.lastSync || null
   };
@@ -115,7 +117,8 @@ async function saveConfiguration(input) {
   const connection = validateConnection({ apiUrl: source.apiUrl || state.config?.apiUrl, connectionToken: source.connectionToken || state.config?.connectionToken });
   const config = { ...connection, loginAccount: validateEmail(source.loginAccount), autoSync: source.autoSync !== false,
     sourceTabId: Number.isInteger(source.sourceTabId) ? source.sourceTabId : null,
-    sourceWindowId: Number.isInteger(source.sourceWindowId) ? source.sourceWindowId : null };
+    sourceWindowId: Number.isInteger(source.sourceWindowId) ? source.sourceWindowId : null,
+    sourceUrl: flowAccountUrl(validateEmail(source.loginAccount)) };
   if (!await chrome.permissions.contains({ origins: [connectionPermission(config.apiUrl)] })) {
     throw new Error('请授权扩展连接本机 GFlow');
   }
@@ -152,25 +155,98 @@ async function sendFlowMessage(tabId, message) {
   return response;
 }
 
-async function discoverAccounts() {
+function flowAccountUrl(email) {
+  const url = new URL(FLOW_URL);
+  url.searchParams.set('authuser', validateEmail(email));
+  return url.href;
+}
+
+// Google 的账号列表接口未公开承诺结构；只读取已知邮箱字段，
+// 列表仅表示候选账号，选中后必须由实际 Flow 页面确认身份。
+function parseGoogleAccounts(text) {
+  const payload = JSON.parse(text.replace(/^\)\]\}'[^\n]*\n/, ''));
+  if (!Array.isArray(payload) || !Array.isArray(payload[1])) return [];
+  const emails = [];
+  for (const row of payload[1]) {
+    if (!Array.isArray(row) || row[0] !== 'gaia.l.a') continue;
+    try { emails.push(validateEmail(row[3])); } catch (_) {}
+  }
+  return [...new Set(emails)];
+}
+
+async function listGoogleAccounts() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard', {
+      credentials: 'include', cache: 'no-store', signal: controller.signal
+    });
+    if (!response.ok) throw new Error('账号列表不可用');
+    return parseGoogleAccounts(await response.text());
+  } finally { clearTimeout(timer); }
+}
+
+async function readFlowAccount(tabId) {
+  const tab = await waitForTabReady(tabId, 30000);
+  if (!tab) throw new Error('Flow 页面加载超时，请稍后重新扫描');
+  if (new URL(tab.url || '').origin !== 'https://flow.google.com') {
+    throw new Error('Flow 需要登录或授权，请在新打开的页面完成后重新扫描');
+  }
+  // 页面完成导航后，认证数据可能仍在初始化。
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const result = await sendFlowMessage(tabId, { action: 'gflow-discover-account' });
+    if (result?.signed_in && result.email) return { email: validateEmail(result.email), tabId, windowId: tab.windowId, verified: true };
+    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('Flow 页面未提供登录账号，请完成登录后重新扫描');
+}
+
+async function selectAccount(email) {
+  email = validateEmail(email);
   const tabs = await chrome.tabs.query({ url: ['https://flow.google.com/*'] });
+  for (const tab of tabs) {
+    try {
+      const result = await sendFlowMessage(tab.id, { action: 'gflow-discover-account' });
+      if (result?.signed_in && validateEmail(result.email) === email) {
+        return { email, tabId: tab.id, windowId: tab.windowId, verified: true };
+      }
+    } catch (_) {}
+  }
+  const tab = await chrome.tabs.create({ url: flowAccountUrl(email), active: false });
+  const account = await readFlowAccount(tab.id);
+  if (account.email !== email) throw new Error('Google 未切换到所选账号，请在 Flow 页面完成账号切换后重试');
+  return account;
+}
+
+async function executeDiscovery() {
+  let tabs = await chrome.tabs.query({ url: ['https://flow.google.com/*'] });
+  let openedFlow = false;
+  if (!tabs.length) {
+    const tab = await chrome.tabs.create({ url: FLOW_URL, active: false });
+    tabs = [tab];
+    openedFlow = true;
+  }
+  const listPromise = listGoogleAccounts().then(emails => ({ emails, available: true }), () => ({ emails: [], available: false }));
   const results = await Promise.all(tabs.map(async tab => {
     try {
-      if (tab.status === 'loading' && !await waitForTabReady(tab.id)) return { status: 'unreadable' };
-      const result = await sendFlowMessage(tab.id, { action: 'gflow-discover-account' });
-      if (!result.signed_in || !result.email) return { status: 'signedOut' };
-      return { status: 'found', account: {
-        email: validateEmail(result.email), tabId: tab.id, windowId: tab.windowId
-      } };
-    } catch (_) {
-      return { status: 'unreadable' };
-    }
+      const account = await readFlowAccount(tab.id);
+      return { account };
+    } catch (error) { return { error: error.message }; }
   }));
-  const accounts = Array.from(new Map(results.filter(item => item.account)
-    .map(item => [item.account.email, item.account])).values());
-  return { ok: true, success: true, accounts, scannedTabs: tabs.length,
-    unreadableTabs: results.filter(item => item.status === 'unreadable').length,
-    signedOutTabs: results.filter(item => item.status === 'signedOut').length };
+  const list = await listPromise;
+  const accounts = new Map(list.emails.map(email => [email, { email, verified: false }]));
+  for (const result of results) if (result.account) accounts.set(result.account.email, result.account);
+  const response = { ok: true, success: true, accounts: [...accounts.values()], scannedTabs: tabs.length,
+    openedFlow, accountListAvailable: list.available,
+    unreadableTabs: results.filter(item => item.error).length,
+    message: results.find(item => item.error)?.error || '' };
+  await chrome.storage.local.set({ accountDiscovery: response });
+  return response;
+}
+
+function discoverAccounts() {
+  if (!activeDiscovery) activeDiscovery = executeDiscovery().finally(() => { activeDiscovery = null; });
+  return activeDiscovery;
 }
 
 async function closeTemporaryTab(tab) {
@@ -218,7 +294,7 @@ async function executeSync() {
   let sourceTab = null;
   if (Number.isInteger(config.sourceTabId)) {
     try { sourceTab = await chrome.tabs.get(config.sourceTabId); } catch (_) { sourceTab = null; }
-    if (!sourceTab) throw new Error('已选择的 Flow 账号页面已关闭，请重新扫描账号并选择邮箱');
+    // 页面关闭或浏览器重启后，按已保存的邮箱重新打开并校验身份。
   }
   if (!sourceTab) {
     const sourceTabs = chrome.tabs?.query ? await chrome.tabs.query({ active: true, currentWindow: true }) : [];
@@ -232,10 +308,13 @@ async function executeSync() {
   }
   let tempTab = null;
   let rawCookies, frontend, observed;
-  let pageUrl = FLOW_URL;
+  let pageUrl = flowAccountUrl(loginAccount);
   try {
     const current = new URL(sourceTab?.url || '');
-    if (current.origin === 'https://flow.google.com') pageUrl = current.origin + current.pathname + current.search;
+    if (current.origin === 'https://flow.google.com') {
+      current.searchParams.set('authuser', loginAccount);
+      pageUrl = current.href;
+    }
   } catch (_) {}
   try {
     if (chrome.tabs?.create && chrome.tabs?.get) {
@@ -367,6 +446,11 @@ function syncNow() {
 chrome.runtime.onMessage.addListener((request, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
   const action = request.action;
+  if (action === 'selectAccount') {
+    selectAccount(request.email).then(account => respond({ success: true, account }),
+      error => respond({ success: false, error: error.message }));
+    return true;
+  }
   if (action === 'discoverAccounts') {
     discoverAccounts().then(respond, error => respond({ ok: false, success: false, error: error.message }));
     return true;

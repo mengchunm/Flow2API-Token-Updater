@@ -35,6 +35,8 @@ async function checkFlowCredits({at,sid,bl}) {
   const url = new URL('/_/AiSandboxAngularFrontend/data/batchexecute', 'https://flow.google.com');
   url.search = new URLSearchParams({rpcids:'nzlxg', 'source-path':location.pathname,
     bl,'f.sid':sid,hl:'en',_reqid:String(Math.floor(Math.random()*80000)+10000),rt:'c'});
+  const authuser = new URL(location.href).searchParams.get('authuser');
+  if (authuser) url.searchParams.set('authuser', authuser);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
   try {

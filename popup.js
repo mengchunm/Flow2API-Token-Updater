@@ -4,30 +4,42 @@ let statusTimer = null;
 let approvedInsecureOrigin = '';
 let selectedAccountBinding = null;
 
+let discoveredAccounts = [];
+
+function renderAccounts(response) {
+    discoveredAccounts = response.accounts || [];
+    const select = document.getElementById('accountSelect');
+    select.innerHTML = '<option value="">请选择账号</option>';
+    for (const account of discoveredAccounts) {
+        const option = document.createElement('option');
+        option.value = account.email;
+        option.textContent = account.email + (account.verified ? ' · Flow 已确认' : ' · 切换后验证');
+        select.appendChild(option);
+    }
+    return discoveredAccounts;
+}
+
+async function chooseAccount(email) {
+    selectedAccountBinding = null;
+    const response = await sendMessage({ action: 'selectAccount', email });
+    if (!response?.success) throw new Error(response?.error || '账号切换失败');
+    const account = response.account;
+    if (account.email !== email) throw new Error('Flow 账号验证不一致，请重试');
+    selectedAccountBinding = { sourceTabId: account.tabId, sourceWindowId: account.windowId };
+    document.getElementById('loginAccount').value = account.email;
+    document.getElementById('accountSelect').value = account.email;
+}
+
 async function discoverAccounts() {
     const response = await sendMessage({ action: 'discoverAccounts' });
-    if (!response || !response.success) throw new Error(response?.error || '账号扫描失败');
-    const select = document.getElementById('accountSelect');
-    select.innerHTML = '';
-    if (!response.accounts?.length) {
-        select.innerHTML = '<option value="">未发现已打开的 Flow 账号</option>';
-        if (!response.scannedTabs) throw new Error('当前浏览器配置中没有打开的 Flow 页面，请先打开 https://flow.google.com 并登录。');
-        if (response.unreadableTabs) throw new Error('发现 Flow 页面但无法读取账号，请等待加载完成或刷新页面后重新扫描，并检查扩展的网站访问权限。');
-        throw new Error('Flow 页面未提供已登录账号，请确认登录完成后刷新 Flow，再重新扫描。');
-    }
-    response.accounts.forEach(account => {
-        const option = document.createElement('option');
-        option.value = account.email; option.textContent = account.email;
-        option.dataset.tabId = String(account.tabId || '');
-        option.dataset.windowId = String(account.windowId || '');
-        select.appendChild(option);
-    });
-    const current = document.getElementById('loginAccount').value;
-    select.value = response.accounts.some(a => a.email === current) ? current : response.accounts[0].email;
-    document.getElementById('loginAccount').value = select.value;
-    const selected = response.accounts.find(a => a.email === select.value);
-    selectedAccountBinding = selected ? { sourceTabId: selected.tabId, sourceWindowId: selected.windowId } : null;
-    return response.accounts;
+    if (!response?.success) throw new Error(response?.error || '账号扫描失败');
+    const accounts = renderAccounts(response);
+    if (!accounts.length) throw new Error(response.message || '已自动打开 Flow，请完成登录后重新扫描。');
+    const current = document.getElementById('loginAccount').value.trim().toLowerCase();
+    const selected = accounts.find(account => account.email === current)
+        || accounts.find(account => account.verified) || accounts[0];
+    await chooseAccount(selected.email);
+    return accounts;
 }
 
 function sendMessage(request) {
@@ -164,7 +176,7 @@ async function loadConfig() {
 document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('discoverBtn').addEventListener('click', async () => {
         setBusy(true);
-        showStatus('正在扫描已打开的 Flow 页面…', 'info', false);
+        showStatus('正在检测账号，必要时自动打开 Flow，请稍候…', 'info', false);
         try {
             const accounts = await discoverAccounts();
             showStatus(`已发现 ${accounts.length} 个 Flow 账号，请选择后保存配置`, 'success');
@@ -175,14 +187,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         selectedAccountBinding = null;
         document.getElementById('accountSelect').value = '';
     });
-    document.getElementById('accountSelect').addEventListener('change', e => {
-        if (!e.target.value) return;
-        document.getElementById('loginAccount').value = e.target.value;
-        const option = e.target.selectedOptions[0];
-        selectedAccountBinding = { sourceTabId: Number(option.dataset.tabId), sourceWindowId: Number(option.dataset.windowId) };
+    document.getElementById('accountSelect').addEventListener('change', async e => {
+        const email = e.target.value;
+        if (!email) return;
+        setBusy(true);
+        showStatus('正在打开并验证所选 Flow 账号…', 'info', false);
+        try {
+            await chooseAccount(email);
+            showStatus('已切换并确认账号，保存配置后用于同步', 'success');
+        } catch (error) { showStatus(error.message, 'error', false); }
+        finally { setBusy(false); }
     });
     try {
         await loadConfig();
+        const { accountDiscovery } = await chrome.storage.local.get('accountDiscovery');
+        if (accountDiscovery?.accounts?.length) {
+            renderAccounts(accountDiscovery);
+            document.getElementById('accountSelect').value = document.getElementById('loginAccount').value;
+        }
     } catch (error) {
         showStatus(`配置读取失败：${error.message}`, 'error', false);
     }
