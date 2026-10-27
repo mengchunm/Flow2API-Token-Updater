@@ -309,49 +309,61 @@ async function selectAccount(email) {
     } catch (_) {}
   }
   const tab = await chrome.tabs.create({ url: flowAccountUrl(email), active: false });
-  const account = await readFlowAccount(tab.id);
-  if (account.email !== email) throw new Error('Google 未切换到所选账号，请在 Flow 页面完成账号切换后重试');
-  return account;
+  try {
+    const account = await readFlowAccount(tab.id);
+    if (account.email !== email) throw new Error('Google 未切换到所选账号，请在 Flow 页面完成账号切换后重试');
+    // 验证页随即关闭，只保留身份和窗口，不把临时标签绑定到配置。
+    return { email: account.email, windowId: account.windowId, verified: true };
+  } finally { await closeTemporaryTab(tab); }
 }
 
 async function executeDiscovery() {
   let tabs = await chrome.tabs.query({ url: ['https://flow.google.com/*'] });
   let openedFlow = false;
-  if (!tabs.length) {
-    const tab = await chrome.tabs.create({ url: FLOW_URL, active: false });
-    tabs = [tab];
-    openedFlow = true;
-  }
-  const chooserPromise = discoverChooserAccounts();
-  const listPromise = listGoogleAccounts().then(emails => ({ emails, available: true }), () => ({ emails: [], available: false }));
-  const results = await Promise.all(tabs.map(async tab => {
-    try {
-      const account = await readFlowAccount(tab.id);
-      let linked = [];
-      try { linked = (await sendFlowMessage(tab.id, { action: 'gflow-account-links' })).accounts || []; } catch (_) {}
-      return { account, linked };
-    } catch (error) { return { error: error.message }; }
-  }));
-  const list = await listPromise;
-  const chooser = await chooserPromise;
-  const chooserEmails = chooser.emails;
-  const accounts = new Map([...list.emails, ...chooserEmails].map(email => [email, { email, verified: false }]));
-  for (const result of results) {
-    for (const linked of result.linked || []) {
-      try { const email = validateEmail(linked.email); if (!accounts.has(email)) accounts.set(email, { email, verified: false }); } catch (_) {}
+  let discoveryTab = null;
+  try {
+    if (!tabs.length) {
+      const tab = await chrome.tabs.create({ url: FLOW_URL, active: false });
+      discoveryTab = tab;
+      tabs = [tab];
+      openedFlow = true;
     }
-    if (result.account) accounts.set(result.account.email, result.account);
-  }
-  const response = { ok: true, success: true, accounts: [...accounts.values()], scannedTabs: tabs.length,
-    openedFlow, accountListAvailable: list.available, chooserAccountCount: chooserEmails.length,
-    diagnostics: { chooserStatus: chooser.status, chooserEntries: chooser.entries, chooserAccounts: chooserEmails.length,
-      googleListStatus: list.available ? 'ok' : 'unavailable', googleListAccounts: list.emails.length,
-      flowAccounts: results.filter(item => item.account).length },
-    unreadableTabs: results.filter(item => item.error).length,
-    message: results.find(item => item.error)?.error || '' };
-  await chrome.storage.local.set({ accountDiscovery: response });
-  await Logger.info('账号扫描来源诊断', response.diagnostics);
-  return response;
+    const chooserPromise = discoverChooserAccounts();
+    const listPromise = listGoogleAccounts().then(emails => ({ emails, available: true }), () => ({ emails: [], available: false }));
+    const results = await Promise.all(tabs.map(async tab => {
+      try {
+        const account = await readFlowAccount(tab.id);
+        let linked = [];
+        try { linked = (await sendFlowMessage(tab.id, { action: 'gflow-account-links' })).accounts || []; } catch (_) {}
+        return { account, linked };
+      } catch (error) { return { error: error.message }; }
+    }));
+    const list = await listPromise;
+    const chooser = await chooserPromise;
+    const chooserEmails = chooser.emails;
+    const accounts = new Map([...list.emails, ...chooserEmails].map(email => [email, { email, verified: false }]));
+    for (const result of results) {
+      for (const linked of result.linked || []) {
+        try { const email = validateEmail(linked.email); if (!accounts.has(email)) accounts.set(email, { email, verified: false }); } catch (_) {}
+      }
+      if (result.account) {
+        const account = result.account.tabId === discoveryTab?.id
+          ? { email: result.account.email, windowId: result.account.windowId, verified: true }
+          : result.account;
+        accounts.set(account.email, account);
+      }
+    }
+    const response = { ok: true, success: true, accounts: [...accounts.values()], scannedTabs: tabs.length,
+      openedFlow, accountListAvailable: list.available, chooserAccountCount: chooserEmails.length,
+      diagnostics: { chooserStatus: chooser.status, chooserEntries: chooser.entries, chooserAccounts: chooserEmails.length,
+        googleListStatus: list.available ? 'ok' : 'unavailable', googleListAccounts: list.emails.length,
+        flowAccounts: results.filter(item => item.account).length },
+      unreadableTabs: results.filter(item => item.error).length,
+      message: results.find(item => item.error)?.error || '' };
+    await chrome.storage.local.set({ accountDiscovery: response });
+    await Logger.info('账号扫描来源诊断', response.diagnostics);
+    return response;
+  } finally { await closeTemporaryTab(discoveryTab); }
 }
 
 function discoverAccounts() {

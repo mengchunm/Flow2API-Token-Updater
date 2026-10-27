@@ -45,7 +45,7 @@ async function chooseAccount(email) {
     if (!response?.success) throw new Error(response?.error || '账号切换失败');
     const account = response.account;
     if (account.email !== email) throw new Error('Flow 账号验证不一致，请重试');
-    selectedAccountBinding = { sourceTabId: account.tabId, sourceWindowId: account.windowId };
+    selectedAccountBinding = { sourceTabId: account.tabId ?? null, sourceWindowId: account.windowId ?? null };
     selectedEmail = account.email;
     document.getElementById('accountSelect').value = account.email;
 }
@@ -54,7 +54,7 @@ async function discoverAccounts() {
     const response = await sendMessage({ action: 'discoverAccounts' });
     if (!response?.success) throw new Error(response?.error || '账号扫描失败');
     const accounts = renderAccounts(response);
-    if (!accounts.length) throw new Error(response.message || '已自动打开 Flow，请完成登录后重新扫描。');
+    if (!accounts.length) throw new Error(response.message || '未发现可用账号，请在 Flow 完成登录后重新扫描。');
     const current = selectedEmail;
     const selected = accounts.find(account => account.email === current)
         || accounts.find(account => account.verified) || accounts[0];

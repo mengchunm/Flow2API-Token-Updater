@@ -24,12 +24,14 @@ function background(tabs, sendMessage, config = {}, overrides = {}) {
   const state = { config };
   let injections = 0;
   const created = [];
+  const removed = [];
   const context = vm.createContext({ URL, console, AbortController,
     setTimeout: (fn, ms) => setTimeout(fn, ms === 500 ? 0 : ms), clearTimeout,
     fetch: overrides.fetch || (async () => { throw new Error('offline'); }), chrome: {
     runtime: { id: 'extension', onMessage: { addListener() {} } },
     tabs: { query: async () => tabs, sendMessage,
       get: async id => ({ ...(tabs.find(tab => tab.id === id) || created.find(tab => tab.id === id)), status: 'complete', url: 'https://flow.google.com/projects' }),
+      remove: async id => { removed.push(id); },
       create: async details => { const tab = { id: 100 + created.length, windowId: 10, ...details }; created.push(tab); return tab; }
     },
     scripting: { executeScript: async details => {
@@ -42,7 +44,7 @@ function background(tabs, sendMessage, config = {}, overrides = {}) {
     alarms: { clear: async () => {}, create: async () => {} }
   } });
   vm.runInContext(source('background.js'), context);
-  return { run: code => vm.runInContext(code, context), state, created, injections: () => injections };
+  return { run: code => vm.runInContext(code, context), state, created, removed, injections: () => injections };
 }
 
 test('scan returns the actual page account and rejects other senders', () => {
@@ -291,4 +293,44 @@ test('scheduled sync follows saved scope and concurrent triggers share one task'
   bg.state.config.syncMode = 'single';
   await bg.run('syncNow()');
   assert.equal(bg.run('singleCalls'), 1);
+});
+
+
+test('discovery closes all extension-created tabs and never binds a closed temporary tab', async () => {
+  const bg = background([], async () => ({signed_in:true,email:'one@example.com'}));
+  const result = await bg.run('discoverAccounts()');
+  assert.equal(result.accounts[0].tabId, undefined);
+  assert.deepEqual([...bg.removed].sort(), bg.created.map(tab => tab.id).sort());
+});
+
+test('selection verification closes temporary tabs on success and identity mismatch', async () => {
+  const bg = background([], async () => ({signed_in:true,email:'one@example.com'}));
+  const account = await bg.run('selectAccount("one@example.com")');
+  assert.equal(account.tabId, undefined);
+  assert.deepEqual(bg.removed, [100]);
+  await assert.rejects(bg.run('selectAccount("two@example.com")'), /未切换/);
+  assert.deepEqual(bg.removed, [100,101]);
+});
+
+test('discovery and selection never close a pre-existing user Flow tab', async () => {
+  const bg = background([{id:7,windowId:10}], async () => ({signed_in:true,email:'one@example.com'}));
+  await bg.run('discoverAccounts()');
+  const account = await bg.run('selectAccount("one@example.com")');
+  assert.equal(account.tabId, 7);
+  assert.ok(!bg.removed.includes(7));
+});
+
+test('upload success and failure both close only the sync temporary tab', async () => {
+  for (const ok of [true,false]) {
+    const bg = background([{id:7,windowId:10,url:'https://flow.google.com/projects'}], async () =>
+      ({signed_in:true,account_matches:true,frontend:{at:'test',sid:'test',bl:'test'}}), {
+        apiUrl:'https://example.com/api/plugin/update-token',connectionToken:'test',loginAccount:'one@example.com'
+      }, {fetch: async () => ({ok,status:ok?200:500,json:async()=>({success:ok,action:'updated'})})});
+    bg.run(`readObservedFlowCookies = async () => ({cookieHeader:'test-cookie',diagnostic:{success:true}});
+      globalThis.setTimeout = (fn, ms) => { if (ms === 5000) { fn(); return 0; } return 0; };`);
+    if (ok) await bg.run('executeSync()');
+    else await assert.rejects(bg.run('executeSync()'), /同步失败/);
+    assert.deepEqual(bg.removed, [100]);
+    assert.ok(!bg.removed.includes(7));
+  }
 });
